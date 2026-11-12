@@ -43,12 +43,40 @@ async function req(url, fields, webhook, overrides = {}) {
     'x-shopify-hmac-sha256': createHmac('sha256', process.env.SHOPIFY_WEBHOOK_SECRET).update(body).digest('base64'),
   } : { 'content-type': 'application/x-www-form-urlencoded' };
   const request = Object.assign(Readable.from([body]), { url, method: fields || webhook ? 'POST' : 'GET', headers: { ...headers, ...overrides } });
-  const result = { headers: {}, setHeader(k,v){this.headers[k]=v;}, writeHead(status, headers){this.status=status;Object.assign(this.headers,headers);return this;}, end(body){this.body=body;} };
+  const result = { headers: {}, setHeader(k,v){this.headers[k]=v;}, getHeader(k){return this.headers[k];}, writeHead(status, headers){this.status=status;Object.assign(this.headers,headers);return this;}, end(body){this.body=body;} };
   await handleRequest(request, result);
   return result;
 }
 const ids = (body, name) => [...body.matchAll(new RegExp('name="' + name + '" value="([A-Za-z0-9_-]{32})"', 'g'))].map(m => m[1]);
 const draftFields = { key:process.env.GC_ORGANIZER_KEY, organizer:'Sarah',recipient:'Maya',email:'maya@example.com',title:'First Place',message:'Hi',guests:'Avery\nJamie',gift:process.env.GC_VARIANTS.split(',') };
+const organizerAccess = await req('/organizer');
+assert.equal(organizerAccess.status, 200);
+const organizerNonce = organizerAccess.body.match(/<script nonce="([^"]+)"/)[1];
+assert.ok(organizerAccess.headers['Content-Security-Policy'].includes("'nonce-" + organizerNonce + "'"));
+assert.ok(!organizerAccess.body.includes(process.env.GC_ORGANIZER_KEY));
+assert.equal((await req('/organizer', { key: 'wrong' })).status, 403);
+assert.equal((await req('/organizer', { key: draftFields.key }, null, { 'sec-fetch-site': 'cross-site' })).status, 403);
+const session = await req('/organizer', { key: draftFields.key });
+assert.equal(session.status, 303);
+assert.equal(session.headers.Location, '/start');
+assert.match(session.headers['Set-Cookie'], /Path=\/start; Max-Age=28800; HttpOnly; Secure; SameSite=Strict/);
+const cookie = session.headers['Set-Cookie'].split(';')[0];
+assert.ok(!(await req('/start', null, null, { cookie })).body.includes('name="key"'));
+assert.ok((await req('/start')).body.includes('name="key"'));
+const { key: fallbackKey, ...privateLinkFields } = draftFields;
+assert.equal((await req('/start', { ...privateLinkFields, action: 'suggest' }, null, { cookie })).status, 200);
+assert.equal((await req('/start', privateLinkFields, null, { cookie: cookie + 'x' })).status, 403);
+assert.equal((await req('/start', privateLinkFields, null, { cookie, 'sec-fetch-site': 'cross-site' })).status, 403);
+const expired = Math.floor(Date.now() / 1000) - 1;
+const expiredSignature = createHmac('sha256', fallbackKey)
+  .update('good-chapter-organizer-session:' + expired).digest('hex');
+assert.equal((await req('/start', privateLinkFields, null, {
+  cookie: '__Secure-gc-organizer=' + expired + '.' + expiredSignature,
+})).status, 403);
+process.env.GC_ORGANIZER_KEY = 'rotated-organizer-key-for-test';
+assert.equal((await req('/start', privateLinkFields, null, { cookie })).status, 403);
+assert.equal((await req('/organizer', { key: fallbackKey })).status, 403);
+process.env.GC_ORGANIZER_KEY = fallbackKey;
 const notes = 'Already has a toaster. Keeps borrowing my tools. Private marker.';
 const ideas = await req('/start', { ...draftFields, action:'suggest', notes, avoid:'mugs', budget:'30' });
 assert.equal(ideas.status, 200);
@@ -63,7 +91,7 @@ const declineLink = emailLink;
 assert.equal((await req(declineLink,{action:'decline'})).status,303);
 assert.match((await req(declineLink)).body,/chapter is closed/);
 assert(!(await req(declineLink,{action:'invite',guest:'fake'})).body.includes('/invite/'));
-const draft = await req('/start', { ...draftFields, notes });
+const draft = await req('/start', { ...privateLinkFields, notes }, null, { cookie });
 assert.equal(draft.status, 201);
 assert(emailLink && !draft.body.includes(emailLink));
 const review = (await req(emailLink)).body;

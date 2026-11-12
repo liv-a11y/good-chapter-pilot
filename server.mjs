@@ -1,6 +1,6 @@
 import { readFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
-import { timingSafeEqual } from 'node:crypto';
+import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 import { pathToFileURL } from 'node:url';
 import { db, atomic, token, digest } from './store.mjs';
 import { demo, validateConfig, catalog, checkout, authenticWebhook, claimProperty } from './shopify.mjs';
@@ -21,6 +21,56 @@ function fail(status, message, code) {
 
 function authorizedKey(value, key = process.env.GC_ORGANIZER_KEY) {
   return Boolean(key) && timingSafeEqual(Buffer.from(digest(value ?? '')), Buffer.from(digest(key)));
+}
+
+const organizerSessionSeconds = 8 * 60 * 60;
+const organizerCookie = '__Secure-gc-organizer';
+
+function organizerSignature(expires) {
+  return createHmac('sha256', process.env.GC_ORGANIZER_KEY)
+    .update('good-chapter-organizer-session:' + expires).digest('hex');
+}
+
+function organizerSession(request) {
+  if (demo) return false;
+  const cookie = request.headers.cookie?.split(/;\s*/).find(value => value.startsWith(organizerCookie + '='));
+  const match = cookie?.slice(organizerCookie.length + 1).match(/^(\d{10})\.([a-f0-9]{64})$/);
+  return Boolean(match && Number(match[1]) > Date.now() / 1000
+    && timingSafeEqual(Buffer.from(match[2]), Buffer.from(organizerSignature(match[1]))));
+}
+
+function organizerLinkPage(response) {
+  const nonce = randomBytes(18).toString('base64');
+  response.setHeader('Content-Security-Policy', response.getHeader('Content-Security-Policy')
+    + "; script-src 'nonce-" + nonce + "'");
+  return page(response, 'Private organizer access', `<h1>Private organizer access</h1>
+    <p>Use your organizer key to make a private link for yourself or a trusted organizer. Anyone with the link can start a chapter.</p>
+    <form method="post" action="/organizer">
+      ${field('Organizer access key', 'key', '', 'type="password" required autocomplete="off"')}
+      <button type="button" id="make-link">Make private link</button>
+      <button>Open chapter form</button>
+    </form>
+    <p id="link-result" hidden><label>Private organizer link <input id="private-link" readonly></label></p>
+    <script nonce="${nonce}">
+      const form = document.querySelector('form[action="/organizer"]');
+      const key = form.elements.namedItem('key');
+      const link = new URL(form.action);
+      const fragment = location.hash.slice(1);
+      if (fragment) {
+        history.replaceState(null, '', link.pathname);
+        key.value = new URLSearchParams(fragment).get('key') || '';
+        if (key.value) form.requestSubmit();
+      }
+      document.getElementById('make-link').addEventListener('click', () => {
+        if (!form.reportValidity()) return;
+        link.hash = new URLSearchParams({ key: key.value }).toString();
+        const output = document.getElementById('private-link');
+        output.value = link.href;
+        document.getElementById('link-result').hidden = false;
+        output.select();
+        key.value = '';
+      });
+    </script>`);
 }
 
 function required(form, key, limit) {
@@ -139,7 +189,7 @@ function budget(form, name) {
   return Number(value);
 }
 
-function startPage(response, gifts, form = new URLSearchParams(), suggested = null) {
+function startPage(response, gifts, form = new URLSearchParams(), suggested = null, signedIn = false) {
   const value = name => form.get(name) ?? '';
   const selected = new Set(form.getAll('gift'));
   const suggestions = new Map((suggested ?? []).map(gift => [gift.id, gift.reason]));
@@ -150,7 +200,7 @@ function startPage(response, gifts, form = new URLSearchParams(), suggested = nu
   return page(response, 'Start a chapter', `${chapterHero('', 'we believe you shouldn’t have to get married to get a fking toaster.', 'Let your people show up for you, whatever chapter you’re in.')}
     <h2>Start a chapter</h2>
     <form method="post">
-    ${demo ? '' : field('Organizer access key', 'key', '', 'type="password" required autocomplete="off"')}
+    ${demo || signedIn ? '' : field('Organizer access key', 'key', '', 'type="password" required autocomplete="off"')}
     ${field('Your name', 'organizer', value('organizer'), 'required maxlength="80"')}
     ${field('Who’s this for?', 'recipient', value('recipient'), 'required maxlength="80"')}
     ${demo ? '' : field('Recipient email', 'email', value('email'), 'type="email" required maxlength="254" autocomplete="off"')}
@@ -221,9 +271,18 @@ async function route(request, response) {
     return page(response, 'Gift claims', merchantView('Gift reopened. The prior claim is retained in the reconciliation history.'));
   }
 
+  if (path === '/organizer' && !demo) {
+    if (!post) return organizerLinkPage(response);
+    if (!authorizedKey(form.get('key'))) fail(403, 'The organizer key is incorrect.');
+    const expires = Math.floor(Date.now() / 1000) + organizerSessionSeconds;
+    response.setHeader('Set-Cookie', `${organizerCookie}=${expires}.${organizerSignature(expires)}; Path=/start; Max-Age=${organizerSessionSeconds}; HttpOnly; Secure; SameSite=Strict`);
+    return redirect(response, '/start');
+  }
+
   if (path === '/start') {
-    if (!post) return startPage(response, await catalog());
-    if (!demo && !authorizedKey(form.get('key'))) {
+    const signedIn = organizerSession(request);
+    if (!post) return startPage(response, await catalog(), undefined, null, signedIn);
+    if (!demo && !signedIn && !authorizedKey(form.get('key'))) {
       fail(403, 'The organizer key is incorrect.');
     }
     if (form.get('action') === 'suggest') {
@@ -233,7 +292,7 @@ async function route(request, response) {
       const guestBudget = budget(form, 'budget');
       const anchorBudget = budget(form, 'anchor');
       const gifts = await catalog();
-      return startPage(response, gifts, form, suggestGifts(gifts, { notes, avoid, guestBudget, anchorBudget }));
+      return startPage(response, gifts, form, suggestGifts(gifts, { notes, avoid, guestBudget, anchorBudget }), signedIn);
     }
     const organizer = required(form, 'organizer', 80);
     const recipient = required(form, 'recipient', 80);

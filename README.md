@@ -41,6 +41,12 @@ Open http://127.0.0.1:3000. Start a chapter, open the review link, approve selec
 6. Use [Shopify test payments](https://help.shopify.com/en/manual/checkout-settings/test-orders) on the development store. Claim one gift and confirm a second invite cannot claim it. Pay, then verify Shopify sends the signed webhook and the correct gift becomes Purchased. Check checkout shipping and pickup. Verify a replay leaves the same state.
 7. Visit `/merchant` with the merchant key. Inspect claims and payment exceptions. For an abandoned, cancelled, or refunded purchase, verify the Shopify checkout or order before reopening the gift. Enter the claim ID and a reconciliation note. Confirm the gift is available again and a later payment on the old claim is flagged for investigation.
 
+### Private organizer link
+
+On your deployed Good Chapter site, open `/organizer`, enter your existing organizer key, and select **Make private link**. Copy the selected link and save it somewhere private. Share it only with trusted organizers. The link contains the organizer key in its URL fragment. The browser removes the fragment and submits the key in a form body over HTTPS. Keep request bodies and cookies out of logs and keep analytics off this page.
+
+Opening the link grants eight hours of organizer access in that browser. The original key still works on `/start`. Changing `GC_ORGANIZER_KEY` and redeploying invalidates old organizer links and browser sessions.
+
 ## Pilot choices and limits
 
 - On Share your chapter, the recipient can enter addresses for approved guests who do not already have a link and use Send invitations. Each guest gets an individual email and revocable link. Good Chapter does not store guest email addresses in its database. Manual sharing remains available. Batch sending to multiple inboxes requires a verified Resend sending domain and a matching GC_EMAIL_FROM. The Resend test sender is limited to the account email. The live review link goes only to the email address the organizer provides. It verifies access to that inbox through possession of a private link, so the recipient should keep it private. Demo mode exposes a sample link for testing. Guests receive individual bearer links.
