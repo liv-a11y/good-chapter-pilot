@@ -1,3 +1,4 @@
+import { readFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import { timingSafeEqual } from 'node:crypto';
 import { pathToFileURL } from 'node:url';
@@ -5,12 +6,13 @@ import { db, atomic, token, digest } from './store.mjs';
 import { demo, validateConfig, catalog, checkout, authenticWebhook, claimProperty } from './shopify.mjs';
 import { suggestGifts } from './recommend.mjs';
 import { merchantView, releaseClaim } from './merchant.mjs';
-import { sendReview, validateMail } from './mail.mjs';
-import { layout, field, area, checks, esc } from './view.mjs';
+import { sendGuestInvites, sendReview, validateMail } from './mail.mjs';
+import { layout, chapterHero, field, area, checks, esc } from './view.mjs';
 
 validateConfig();
 validateMail();
 const query = sql => db.prepare(sql);
+const brandLogo = await readFile(new URL('./brand-logo.png', import.meta.url));
 const idPattern = '[A-Za-z0-9_-]{32}';
 
 function fail(status, message, code) {
@@ -53,6 +55,45 @@ function setGuestToken(chapter, guest) {
   query('UPDATE guests SET token_hash = ? WHERE chapter = ? AND id = ? AND approved = 1')
     .run(digest(guestToken), chapter, guest);
   return guestToken;
+}
+
+async function emailGuests(chapter, form) {
+  const approved = query('SELECT id FROM guests WHERE chapter = ? AND approved = 1').all(chapter.id);
+  const entered = approved.map(guest => ({ id: guest.id, email: (form.get('email_' + guest.id) ?? '').trim() }))
+    .filter(guest => guest.email);
+  if (!entered.length) return 'Enter at least one guest email address.';
+  if (entered.some(({ email }) => email.length > 254 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email))) {
+    return 'Check the guest email addresses and try again.';
+  }
+  if (new Set(entered.map(({ email }) => email.toLowerCase())).size !== entered.length) {
+    return 'Use a different email address for each guest.';
+  }
+  const invites = atomic(() => {
+    if (query('SELECT status FROM chapters WHERE id = ?').get(chapter.id).status !== 'approved') return [];
+    const reserve = query('UPDATE guests SET token_hash = ? WHERE chapter = ? AND id = ? AND approved = 1 AND token_hash IS NULL');
+    return entered.flatMap(guest => {
+      const guestToken = token();
+      const hash = digest(guestToken);
+      return reserve.run(hash, chapter.id, guest.id).changes
+        ? [{ ...guest, hash, path: '/invite/' + guestToken }] : [];
+    });
+  });
+  if (!invites.length) return 'Those guests already have links or the chapter was closed.';
+  let accepted;
+  try {
+    accepted = await sendGuestInvites(chapter, invites);
+  } catch {
+    return 'We couldn’t confirm the email send. Check with your guests before replacing or revoking their links.';
+  }
+  if (!accepted) {
+    atomic(() => {
+      const release = query('UPDATE guests SET token_hash = NULL WHERE chapter = ? AND id = ? AND token_hash = ?');
+      for (const invite of invites) release.run(chapter.id, invite.id, invite.hash);
+    });
+    return 'The email provider rejected the send. Check the addresses and sending settings, then try again.';
+  }
+  const count = invites.length;
+  return count === 1 ? '1 invitation submitted for delivery.' : `${count} invitations submitted for delivery.`;
 }
 
 function paidWebhook(order) {
@@ -106,7 +147,8 @@ function startPage(response, gifts, form = new URLSearchParams(), suggested = nu
   const choices = sorted.map(gift => `<label><input type="checkbox" name="gift" value="${esc(gift.id)}"
     ${selected.has(gift.id) ? 'checked' : ''}> ${esc(gift.title)} · ${esc(gift.price)}
     ${suggestions.has(gift.id) ? '<br><small>' + esc(suggestions.get(gift.id)) + '</small>' : ''}</label>`).join('');
-  return page(response, 'Start a chapter', `<h1>Start a chapter.</h1>
+  return page(response, 'Start a chapter', `${chapterHero('', 'we believe you shouldn’t have to get married to get a fking toaster.', 'Let your people show up for you, whatever chapter you’re in.')}
+    <h2>Start a chapter</h2>
     <form method="post">
     ${demo ? '' : field('Organizer access key', 'key', '', 'type="password" required autocomplete="off"')}
     ${field('Your name', 'organizer', value('organizer'), 'required maxlength="80"')}
@@ -154,9 +196,15 @@ async function route(request, response) {
   }
   const form = post ? new URLSearchParams((await readBody(request, 16_384)).toString()) : null;
 
+  if (path === '/brand-logo.png' && !post) {
+    response.writeHead(200, { 'Content-Type': 'image/png' });
+    response.end(brandLogo);
+    return;
+  }
+
   if (path === '/' && !post) {
-    return page(response, 'Good Chapter', `<h1>You don’t have to get married to get a toaster.</h1>
-      <p>Start a chapter for someone you love. They’ll decide what to share and who to bring along.</p>
+    return page(response, 'Good Chapter', `<h1>we believe you shouldn’t have to get married to get a fking toaster.</h1>
+      <p>Let your people show up for you, whatever chapter you’re in.</p>
       <a class="button" href="/start">Start a chapter</a>`);
   }
 
@@ -250,9 +298,8 @@ async function route(request, response) {
       return redirect(response, path);
     }
     if (chapter.status === 'draft') {
-      return page(response, 'Private review', `<h1>Make it yours.</h1>
-        <p>${esc(chapter.organizer)} started this for you, ${esc(chapter.recipient)}. Choose who’s invited, what’s on the list, and what they’ll read.</p>
-        <form method="post">
+      return page(response, 'Private review', `${chapterHero('Private review', 'make it yours.', `${chapter.organizer} started this for you, ${chapter.recipient}. Choose who’s invited, what’s on the list, and what they’ll read.`)}
+        <form method="post" class="panel">
         ${field('Chapter title', 'title', chapter.title, 'required maxlength="100"')}
         <p>Guests will see the invitation note. Keep addresses and private details out of it.</p>
         ${area('Invitation note', 'message', chapter.message, 'required maxlength="1600"')}
@@ -264,6 +311,7 @@ async function route(request, response) {
     }
     if (chapter.status !== 'approved') return page(response, 'Chapter closed', '<h1>This chapter is closed.</h1>');
     let invitation = '';
+    let emailStatus = '';
     if (post) {
       if (form.get('action') === 'close') {
         query("UPDATE chapters SET status = 'closed' WHERE id = ?").run(chapter.id);
@@ -280,20 +328,33 @@ async function route(request, response) {
         if (!result.changes) fail(409, 'This gift can’t be removed because it is reserved, purchased, or already removed.');
         return redirect(response, path);
       }
-      if (form.get('action') !== 'invite') fail(400, 'Choose an invitation action.');
-      const guest = query('SELECT id, name FROM guests WHERE chapter = ? AND id = ? AND approved = 1').get(chapter.id, form.get('guest'));
-      if (!guest) fail(404, 'This guest was not approved.');
-      const link = '/invite/' + setGuestToken(chapter.id, guest.id);
-      invitation = `<section class="gift"><h2>Invitation for ${esc(guest.name)}</h2>
-        <p class="message">An invitation from ${esc(chapter.organizer)}\n\n${esc(chapter.message)}</p>
-        <p>Open the invitation and copy the full URL to forward it.</p><a class="button" href="${link}">Open invitation</a></section>`;
+      if (form.get('action') === 'email-guests' && !demo) {
+        emailStatus = await emailGuests(chapter, form);
+      } else if (form.get('action') === 'invite') {
+        const guest = query('SELECT id, name FROM guests WHERE chapter = ? AND id = ? AND approved = 1').get(chapter.id, form.get('guest'));
+        if (!guest) fail(404, 'This guest was not approved.');
+        const link = '/invite/' + setGuestToken(chapter.id, guest.id);
+        invitation = `<section class="gift"><h2>Invitation for ${esc(guest.name)}</h2>
+          <p class="message">An invitation from ${esc(chapter.organizer)}\n\n${esc(chapter.message)}</p>
+          <p>Open the invitation and copy the full URL to forward it.</p><a class="button" href="${link}">Open invitation</a></section>`;
+      } else {
+        fail(400, 'Choose an invitation action.');
+      }
     }
     const guests = query('SELECT id, name, token_hash FROM guests WHERE chapter = ? AND approved = 1').all(chapter.id);
+    const emailGuestsAvailable = guests.filter(guest => !guest.token_hash);
     const gifts = query(`SELECT gifts.id, gifts.title, claims.state FROM gifts LEFT JOIN claims ON claims.gift = gifts.id
       WHERE gifts.chapter = ? AND gifts.approved = 1`).all(chapter.id);
-    return page(response, 'Share your chapter', `<h1>Share your chapter.</h1>
-      <p>Forward each approved guest their own invitation. It credits ${esc(chapter.organizer)} for starting your chapter.</p>
+    return page(response, 'Share your chapter', `${chapterHero('Approved chapter', 'share your chapter.', `Email an invitation or share an individual link with each approved guest. The invitation credits ${chapter.organizer} for starting your chapter.`)}
+      ${emailStatus ? '<p role="status">' + esc(emailStatus) + '</p>' : ''}
+      ${!demo && emailGuestsAvailable.length ? `<form method="post">
+        <fieldset><legend>Email invitations</legend>
+          <p>Enter an email for each approved guest you’d like to invite now. Each person gets their own link.</p>
+          ${emailGuestsAvailable.map(guest => field(guest.name + '’s email', 'email_' + guest.id, '', 'type="email" maxlength="254"')).join('')}
+          <button name="action" value="email-guests">Send invitations</button>
+        </fieldset></form>` : ''}
       ${invitation}
+      <h2>Share links manually</h2>
       ${guests.map(guest => `<form method="post"><input type="hidden" name="guest" value="${guest.id}">
         <button name="action" value="invite">${guest.token_hash ? 'Replace link for' : 'Make link for'} ${esc(guest.name)}</button>
         ${guest.token_hash ? '<button class="quiet" name="action" value="revoke">Revoke access</button>' : ''}</form>`).join('')}
@@ -361,10 +422,10 @@ async function route(request, response) {
     } catch {
       currentCatalog = null;
     }
-    return page(response, guest.title, `<p>Started by ${esc(guest.organizer)}</p><h1>${esc(guest.title)}</h1>
+    return page(response, guest.title, `${chapterHero('You’re invited', guest.title, `Started by ${guest.organizer}`)}
       <p class="message">${esc(guest.message)}</p>
-      <p>${demo ? 'Choose a gift to try the checkout flow.' : 'Ship to yourself or use store pickup if offered, then give the gift directly.'}</p>
-      ${gifts.map(gift => {
+      <p class="muted">${demo ? 'Choose a gift to try the checkout flow.' : 'Ship to yourself or use store pickup if offered, then give the gift directly.'}</p>
+      <div class="gift-grid">${gifts.map(gift => {
         const ownCheckout = gift.state === 'checkout' && gift.guest === guest.guest_id;
         const label = ownCheckout ? (demo ? 'Simulate payment' : 'Resume checkout') : 'Choose this gift';
         const action = ownCheckout && demo ? 'pay' : 'checkout';
@@ -377,7 +438,7 @@ async function route(request, response) {
             : !gift.state || ownCheckout
             ? `<form method="post"><input type="hidden" name="gift" value="${gift.id}"><button name="action" value="${action}">${label}</button></form>`
             : '<p>Reserved</p>'}</section>`;
-      }).join('')}`);
+      }).join('')}</div>`);
   }
   fail(404, 'This page is unavailable.');
 }
@@ -387,7 +448,7 @@ export async function handleRequest(request, response) {
   response.setHeader('Referrer-Policy', 'no-referrer');
   response.setHeader('X-Robots-Tag', 'noindex, nofollow');
   response.setHeader('X-Content-Type-Options', 'nosniff');
-  response.setHeader('Content-Security-Policy', "default-src 'none'; style-src 'unsafe-inline'; form-action 'self' https:; base-uri 'none'; frame-ancestors 'none'");
+  response.setHeader('Content-Security-Policy', "default-src 'none'; img-src 'self'; style-src 'unsafe-inline'; form-action 'self' https:; base-uri 'none'; frame-ancestors 'none'");
   try {
     await route(request, response);
   } catch (error) {

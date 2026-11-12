@@ -10,8 +10,14 @@ Object.assign(process.env, {
 });
 const { handleRequest } = await import('./server.mjs');
 let emailLink, claim, soldOut = false, shopDown = false;
+let guestEmails = [], rejectGuestEmails = false;
 globalThis.fetch = async (url, options) => {
   const body = JSON.parse(options.body);
+  if (url === 'https://api.resend.com/emails/batch') {
+    guestEmails.push(body);
+    if (rejectGuestEmails) return Response.json({ name: 'validation_error' }, { status: 403 });
+    return Response.json({ data: body.map((_, index) => ({ id: 'email-' + index })) });
+  }
   if (url.includes('resend.com')) {
     assert.deepEqual(body.to, ['maya@example.com']);
     emailLink = new URL(body.text.match(/https:[^\s]+/)[0]).pathname;
@@ -65,7 +71,7 @@ assert(!review.includes('Private marker'));
 const [gift, removed, spare] = ids(review,'gift');
 const guests = ids(review,'guest');
 assert.equal((await req(emailLink,{action:'approve',title:'First Place',message:'Approved',gift:[gift,removed,spare],guest:guests})).status,303);
-const invite = async guest => (await req(emailLink,{action:'invite',guest})).body.match(/href="(\/invite\/[^\"]+)"/)[1];
+const invite = async guest => (await req(emailLink,{action:'invite',guest})).body.match(/href="(\/invite\/[^"]+)"/)[1];
 const first = await invite(guests[0]), second = await invite(guests[1]);
 assert.equal((await req(emailLink,{action:'remove',gift:removed})).status,303);
 assert(!((await req(first)).body.includes('Toolbox')));
@@ -99,3 +105,37 @@ assert.match((await req('/merchant',{key:process.env.GC_MERCHANT_KEY,action:'vie
 for(let i=0;i<2;i++) assert.equal((await req('/webhooks/orders-paid',null,order(56,claim))).status,204);
 assert.match((await req(first)).body,/Purchased/);
 console.log('Passed mocked live-mode recommendations, email, consent, guest controls, inventory, checkout, release, late payment, and webhook replay.');
+
+await req('/start', { ...draftFields, guests:'Avery\nJamie\nTaylor', notes });
+const batchReview = (await req(emailLink)).body;
+const [batchGift] = ids(batchReview, 'gift');
+const [avery, jamie, taylor] = ids(batchReview, 'guest');
+const fields = { action:'email-guests', ['email_' + avery]:'avery@example.com', ['email_' + jamie]:'jamie@example.com', ['email_' + taylor]:'taylor@example.com' };
+await req(emailLink, fields);
+assert.equal(guestEmails.length, 0);
+assert.equal((await req(emailLink,{action:'approve',title:'First Place',message:'Approved note',gift:batchGift,guest:[avery,jamie]})).status,303);
+assert.match((await req(emailLink)).body, /Email invitations/);
+await req(emailLink, { ...fields, ['email_' + jamie]:'AVERY@example.com' });
+assert.equal(guestEmails.length, 0);
+rejectGuestEmails = true;
+assert.match((await req(emailLink, fields)).body, /provider rejected/);
+const rejectedLink = new URL(guestEmails[0][0].text.split(' ').at(-1)).pathname;
+assert.equal((await req(rejectedLink)).status, 404);
+rejectGuestEmails = false;
+assert.match((await req(emailLink, fields)).body, /2 invitations submitted/);
+const accepted = guestEmails[1];
+assert.deepEqual(accepted.map(message => message.to), [['avery@example.com'], ['jamie@example.com']]);
+const invitePaths = accepted.map(message => new URL(message.text.split(' ').at(-1)).pathname);
+assert.notEqual(invitePaths[0], invitePaths[1]);
+for (const [index, message] of accepted.entries()) {
+  assert.match(message.text, /Started by Sarah/);
+  assert.match(message.text, /Approved note/);
+  assert.doesNotMatch(message.text, /Private marker|@example.com/);
+  assert.equal((await req(invitePaths[index])).status, 200);
+}
+await req(emailLink, fields);
+assert.equal(guestEmails.length, 2);
+await req(emailLink, { action:'revoke', guest:avery });
+assert.equal((await req(invitePaths[0])).status, 404);
+assert.equal((await req(invitePaths[1])).status, 200);
+console.log('Passed batch invite approval, recipient isolation, retry, repeat submission and revocation tests.');
