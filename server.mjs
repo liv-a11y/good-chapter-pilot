@@ -39,10 +39,15 @@ function organizerSession(request) {
     && timingSafeEqual(Buffer.from(match[2]), Buffer.from(organizerSignature(match[1]))));
 }
 
-function organizerLinkPage(response) {
+function allowInlineScript(response) {
   const nonce = randomBytes(18).toString('base64');
   response.setHeader('Content-Security-Policy', response.getHeader('Content-Security-Policy')
     + "; script-src 'nonce-" + nonce + "'");
+  return nonce;
+}
+
+function organizerLinkPage(response) {
+  const nonce = allowInlineScript(response);
   return page(response, 'Private organizer access', `<h1>Private organizer access</h1>
     <p>Use your organizer key to make a private link for yourself or a trusted organizer. Anyone with the link can start a chapter.</p>
     <form method="post" action="/organizer">
@@ -194,31 +199,67 @@ function startPage(response, gifts, form = new URLSearchParams(), suggested = nu
   const selected = new Set(form.getAll('gift'));
   const suggestions = new Map((suggested ?? []).map(gift => [gift.id, gift.reason]));
   const sorted = [...(suggested ?? []), ...gifts.filter(gift => !suggestions.has(gift.id))];
-  const choices = sorted.map(gift => `<label><input type="checkbox" name="gift" value="${esc(gift.id)}"
-    ${selected.has(gift.id) ? 'checked' : ''}> ${esc(gift.title)} · ${esc(gift.price)}
-    ${suggestions.has(gift.id) ? '<br><small>' + esc(suggestions.get(gift.id)) + '</small>' : ''}</label>`).join('');
-  return page(response, 'Start a chapter', `${chapterHero('', 'we believe you shouldn’t have to get married to get a fking toaster.', 'Let your people show up for you, whatever chapter you’re in.')}
-    <h2>Start a chapter</h2>
-    <form method="post">
+  const nonce = allowInlineScript(response);
+  const selectedCount = sorted.filter(gift => selected.has(gift.id)).length;
+  const choices = sorted.map(gift => {
+    const imageUrl = gift.image?.url;
+    const photo = typeof imageUrl === 'string' && /^https:\/\/cdn\.shopify\.com\//i.test(imageUrl)
+      ? `<img src="${esc(imageUrl)}" alt="${esc(gift.image.altText ?? '')}" loading="lazy">`
+      : '';
+    return `<label class="picker-card">
+      ${photo}
+      <span class="picker-details">
+        <span class="picker-title">${esc(gift.title)}</span>
+        <span>${esc(gift.price)}</span>
+        ${suggestions.has(gift.id) ? '<small>' + esc(suggestions.get(gift.id)) + '</small>' : ''}
+        <span class="picker-toggle"><input type="checkbox" name="gift" value="${esc(gift.id)}"
+          ${selected.has(gift.id) ? 'checked' : ''} aria-label="Add ${esc(gift.title)}">
+          <span class="add-gift">Add gift</span><span class="added-gift">Added</span>
+        </span>
+      </span>
+    </label>`;
+  }).join('');
+  return page(response, 'Start a chapter', `<div class="picker-intro">
+    <p class="eyebrow">First Place</p><h1>Start a chapter.</h1>
+    <p>Pick a few things they’ll actually use in their first place.</p></div>
+    <form method="post" action="/start">
+    <section class="panel picker-section"><h2>Tell us about them</h2>
     ${demo || signedIn ? '' : field('Organizer access key', 'key', '', 'type="password" required autocomplete="off"')}
     ${field('Your name', 'organizer', value('organizer'), 'required maxlength="80"')}
     ${field('Who’s this for?', 'recipient', value('recipient'), 'required maxlength="80"')}
     ${demo ? '' : field('Recipient email', 'email', value('email'), 'type="email" required maxlength="254" autocomplete="off"')}
     ${field('Chapter title', 'title', value('title'), 'required maxlength="100" placeholder="Maya’s first place"')}
-    ${area('A note from you', 'message', value('message'), 'required maxlength="1600"')}
-    <details ${suggested !== null ? 'open' : ''}><summary>Get gift ideas</summary>
-      <p>Keep addresses and private details out of the invitation note.</p>
       <p>These shopping notes are only used to suggest gifts. They stay out of the chapter and invitations.</p>
       ${area('What would they use or love?', 'notes', value('notes'), 'maxlength="1200" placeholder="Loves cooking, already has a toaster, keeps borrowing my tools."')}
       ${field('What should we skip?', 'avoid', value('avoid'), 'maxlength="300"')}
       ${field('Guest budget per gift (store currency)', 'budget', value('budget'), 'type="number" min="0.01" step="0.01"')}
       ${field('Organizer gift budget (optional)', 'anchor', value('anchor'), 'type="number" min="0.01" step="0.01"')}
-      <button class="quiet" name="action" value="suggest" formnovalidate>Find gift ideas</button>
-    </details>
+      <button class="quiet" name="action" value="suggest" formaction="/start#gift-picker" formnovalidate>Find gift ideas</button>
+    </section>
+    <fieldset id="gift-picker" class="picker-section"><legend>Build their gift list</legend>
     ${suggested?.length === 0 ? '<p role="status">No gift ideas matched. Try a different detail or budget, or pick from the catalog.</p>' : ''}
-    <fieldset><legend>Choose up to eight gifts</legend>${choices}</fieldset>
+      <p id="gift-count" role="status">${selectedCount} of 8 gifts selected</p>
+      ${choices ? '<div class="picker-grid">' + choices + '</div>' : '<p>No gifts are available right now.</p>'}
+    </fieldset>
+    <section class="panel picker-section"><h2>Send for their eyes only</h2>
+    <p>They’ll review the gifts, guests, and note before anyone gets an invitation. Keep addresses and private details out of the note.</p>
+    ${area('A note from you', 'message', value('message'), 'required maxlength="1600"')}
     ${area('Who might want to help? One name per line.', 'guests', value('guests'), 'required maxlength="2000"')}
-    <button>${demo ? 'Make private review link' : 'Send private review'}</button></form>`);
+    <button>${demo ? 'Make private review link' : 'Send private review'}</button></section></form>
+    <script nonce="${nonce}">
+      const picker = document.getElementById('gift-picker');
+      const count = document.getElementById('gift-count');
+      function updateCount() {
+        const selected = picker.querySelectorAll('input:checked').length;
+        count.textContent = selected + ' of 8 gifts selected';
+        for (const choice of picker.querySelectorAll('input')) {
+          choice.disabled = selected >= 8 && !choice.checked;
+        }
+      }
+      picker.addEventListener('change', updateCount);
+      window.addEventListener('pageshow', updateCount);
+      updateCount();
+    </script>`);
 }
 
 async function route(request, response) {
@@ -507,7 +548,7 @@ export async function handleRequest(request, response) {
   response.setHeader('Referrer-Policy', 'no-referrer');
   response.setHeader('X-Robots-Tag', 'noindex, nofollow');
   response.setHeader('X-Content-Type-Options', 'nosniff');
-  response.setHeader('Content-Security-Policy', "default-src 'none'; img-src 'self'; style-src 'unsafe-inline'; form-action 'self' https:; base-uri 'none'; frame-ancestors 'none'");
+  response.setHeader('Content-Security-Policy', "default-src 'none'; img-src 'self' https://cdn.shopify.com; style-src 'unsafe-inline'; form-action 'self' https:; base-uri 'none'; frame-ancestors 'none'");
   try {
     await route(request, response);
   } catch (error) {

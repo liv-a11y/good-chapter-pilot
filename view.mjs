@@ -29,8 +29,19 @@ export function layout(title, content, demo) {
   .gift-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,225px),1fr));gap:12px;margin-top:24px}
   .gift{padding:18px;border:1px solid var(--line);border-radius:5px;background:var(--card);margin-block:12px}.gift-grid .gift{margin:0;display:flex;flex-direction:column;align-items:flex-start}.gift-grid .gift form{margin-top:auto}
   .gift h2{font-size:1.5rem;margin-bottom:8px}.gift p{margin-bottom:4px;color:var(--muted)}.muted{color:var(--muted);font-size:.9rem}
+  .picker-intro{margin-bottom:34px}.picker-intro h1{margin-bottom:14px}
+  .picker-section{margin-block:24px}.picker-section input + p{margin-top:16px}
+  .picker-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,200px),1fr));gap:14px}
+  .picker-card{display:flex;flex-direction:column;margin:0;border:1px solid var(--line);border-radius:6px;overflow:hidden;background:#fff7ed;cursor:pointer}
+  .picker-card img{width:100%;aspect-ratio:4/3;object-fit:contain;background:#fff;display:block}
+  .picker-details{padding:16px;display:flex;flex:1;flex-direction:column;gap:8px;overflow-wrap:anywhere}
+  .picker-title{font:normal 1.35rem/1.15 var(--serif)}
+  .picker-toggle{display:flex;align-items:center;min-height:44px;margin-top:auto;padding-top:6px;color:var(--cobalt)}
+  .picker-card:has(input:checked){border-color:var(--cobalt);box-shadow:inset 0 0 0 1px var(--cobalt)}
+  .picker-card:has(input:disabled){cursor:default}
+  .picker-toggle input:not(:checked) ~ .added-gift,.picker-toggle input:checked ~ .add-gift{display:none}
   @media(max-width:380px){.chapter-hero{gap:10px}.chapter-hero h1{font-size:2.45rem}}
-  </style><header><div><a class="wordmark" href="/" aria-label="Good Chapter, Co. home"><img src="/brand-logo.png" width="600" height="264" alt=""></a><a class="header-home" href="/">Home</a></div></header><main>${content}</main>
+  </style><header><div><a class="wordmark" href="/" aria-label="Good Chapter, Co. home"><img src="/brand-logo.png" width="600" height="264" alt=""></a><a class="header-home" href="https://goodchaptercollective.com/">Good Chapter home</a></div></header><main>${content}</main>
   <footer><small>${demo ? 'Demo mode · Sample gifts and simulated checkout' : 'Good Chapter, Co.'}</small></footer></html>`;
 }
 

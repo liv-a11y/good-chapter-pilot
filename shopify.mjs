@@ -53,11 +53,19 @@ export async function catalog() {
     throw new Error('Configure up to 100 Shopify product variant IDs.');
   }
   const data = await graphql(`query GiftCatalog($ids: [ID!]!) {
-    nodes(ids: $ids) { ... on ProductVariant { id title availableForSale product { title productType tags } price { amount currencyCode } } }
+    nodes(ids: $ids) {
+      ... on ProductVariant {
+        id title availableForSale
+        image { url(transform: {maxWidth: 640}) altText }
+        product { title productType tags featuredImage { url(transform: {maxWidth: 640}) altText } }
+        price { amount currencyCode }
+      }
+    }
   }`, { ids });
   return data.nodes.filter(variant => variant?.availableForSale).map(variant => ({
     id: variant.id,
     title: variant.title === 'Default Title' ? variant.product.title : `${variant.product.title} · ${variant.title}`,
+    image: variant.image ?? variant.product.featuredImage,
     productType: variant.product.productType,
     tags: variant.product.tags,
     amount: Number(variant.price.amount),

@@ -26,7 +26,8 @@ globalThis.fetch = async (url, options) => {
   if (shopDown) return new Response('', { status: 503 });
   if (body.query.includes('GiftCatalog')) return Response.json({ data: { nodes: body.variables.ids.map((id, index) => ({
     id, title: 'Default Title', availableForSale: !(soldOut && index === 0),
-    product: { title: ['Toaster','Toolbox','Mugs'][index] }, price: { amount: '24.99', currencyCode: 'USD' },
+    image: index === 1 ? { url: 'https://cdn.shopify.com/toolbox.jpg', altText: 'Toolbox' } : null,
+    product: { title: ['Toaster','Toolbox','Mugs'][index], featuredImage: { url: index === 2 ? 'https://other.example/mugs.jpg' : 'https://cdn.shopify.com/product.jpg' } }, price: { amount: '24.99', currencyCode: 'USD' },
   })) } });
   const line = body.variables.input.lines[0];
   claim = line.attributes[0].value;
@@ -80,7 +81,11 @@ process.env.GC_ORGANIZER_KEY = fallbackKey;
 const notes = 'Already has a toaster. Keeps borrowing my tools. Private marker.';
 const ideas = await req('/start', { ...draftFields, action:'suggest', notes, avoid:'mugs', budget:'30' });
 assert.equal(ideas.status, 200);
-assert.match(ideas.body, /Toolbox · \$24\.99[\s\S]*?Matches your note about tools and home projects/);
+assert.match(ideas.body, /3 of 8 gifts selected/);
+assert.match(ideas.body, /src="https:\/\/cdn\.shopify\.com\/toolbox\.jpg"/);
+assert.match(ideas.body, /src="https:\/\/cdn\.shopify\.com\/product\.jpg"/);
+assert.doesNotMatch(ideas.body, /other\.example/);
+assert.match(ideas.body, /Toolbox<\/span>\s*<span>\$24\.99[\s\S]*?Matches your note about tools and home projects/);
 assert.equal([...ideas.body.matchAll(/Matches your note|Fits the budget/g)].length, 1);
 assert.equal(emailLink, undefined);
 assert.equal((await req('/start', draftFields, null, { origin:'null', 'sec-fetch-site':'cross-site' })).status,403);
