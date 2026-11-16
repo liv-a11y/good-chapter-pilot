@@ -1,0 +1,1 @@
+ALTER TABLE public.waitlist_signups ADD COLUMN IF NOT EXISTS comments text CHECK (comments IS NULL OR char_length(comments) <= 1000);

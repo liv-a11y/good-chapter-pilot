@@ -1,0 +1,1 @@
+ALTER TABLE public.waitlist_signups ADD COLUMN IF NOT EXISTS contact_name text, ADD COLUMN IF NOT EXISTS organization text, ADD COLUMN IF NOT EXISTS role_title text, ADD COLUMN IF NOT EXISTS team_size text;
